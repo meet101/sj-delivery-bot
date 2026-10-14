@@ -4,14 +4,27 @@
 // Uses the same .env and google-credentials.json as the bot.
 
 require('dotenv').config();
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const Anthropic = require('@anthropic-ai/sdk');
 const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 
-const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID;
-const TIMEZONE       = process.env.TIMEZONE || 'Asia/Kolkata';
-const PDF_DIR        = path.join(__dirname, 'pdfs');
+const SPREADSHEET_ID  = process.env.GOOGLE_SPREADSHEET_ID;
+const TIMEZONE        = process.env.TIMEZONE || 'Asia/Kolkata';
+const PDF_DIR         = path.join(__dirname, 'pdfs');
+const TRACKING_FILE   = path.join(__dirname, '.processed.json');
+
+// ─── Local progress tracking ──────────────────────────────────────────────────
+function loadProcessed() {
+  try { return new Set(JSON.parse(fs.readFileSync(TRACKING_FILE, 'utf8'))); }
+  catch { return new Set(); }
+}
+
+function markProcessed(filename) {
+  const processed = loadProcessed();
+  processed.add(filename);
+  fs.writeFileSync(TRACKING_FILE, JSON.stringify([...processed], null, 2));
+}
 
 const HEADERS = [
   'Received At', 'Date', 'Order No', 'Delivery Seq No',
@@ -56,7 +69,7 @@ async function appendToTab(sheets, tabName, rows) {
 }
 
 // ─── Gemini ───────────────────────────────────────────────────────────────────
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const PROMPT = `Extract all data from this delivery order PDF.
 Return ONLY a valid JSON array — no markdown, no explanation.
@@ -76,14 +89,38 @@ Each element is one line item with exactly these keys:
 Header fields repeat on every row. One object per line item.`;
 
 async function extractFromPDF(base64Data) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-  const result = await model.generateContent([
-    { inlineData: { mimeType: 'application/pdf', data: base64Data } },
-    PROMPT
-  ]);
-  const raw   = result.response.text().trim();
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5',
+    max_tokens: 8000,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
+        { type: 'text', text: PROMPT }
+      ]
+    }]
+  });
+
+  const raw   = response.content[0].text.trim();
   const clean = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-  return JSON.parse(clean);
+
+  try {
+    return JSON.parse(clean);
+  } catch (err) {
+    // Try to salvage a truncated response by closing the array
+    const lastComma = clean.lastIndexOf('},');
+    if (lastComma !== -1) {
+      const salvaged = clean.slice(0, lastComma + 1) + ']';
+      try {
+        const items = JSON.parse(salvaged);
+        console.log(`\n   ⚠️  Response was truncated — salvaged ${items.length} items`);
+        return items;
+      } catch {}
+    }
+    // Log snippet to help diagnose
+    console.log('\n   Raw response snippet:', clean.slice(-200));
+    throw new Error(`JSON parse failed: ${err.message}`);
+  }
 }
 
 function formatTabDate(dateStr) {
@@ -120,7 +157,7 @@ async function main() {
   }
 
   const files = fs.readdirSync(PDF_DIR)
-    .filter(f => f.toLowerCase().endsWith('.pdf'))
+    .filter(f => f.toLowerCase().endsWith('.pdf') && f.toLowerCase().startsWith('delivery_'))
     .sort();
 
   if (files.length === 0) {
@@ -133,6 +170,7 @@ async function main() {
   files.forEach((f, i) => console.log(`   ${i + 1}. ${f}`));
   console.log('');
 
+  const processed    = loadProcessed();
   const sheets       = await getSheetsClient();
   const existingTabs = await listExistingTabs(sheets);
 
@@ -143,14 +181,21 @@ async function main() {
     const filepath = path.join(PDF_DIR, filename);
     process.stdout.write(`[${i + 1}/${files.length}] ${filename} … `);
 
+    // ── Skip if already successfully processed ────────────────────────────────
+    if (processed.has(filename)) {
+      console.log(`skipped (already done)`);
+      skipped++;
+      continue;
+    }
+
     try {
       const base64 = fs.readFileSync(filepath).toString('base64');
       const items   = await extractFromPDF(base64);
       const tabName = makeTabName(items);
 
-      // Skip if this tab already exists (avoids duplicates on re-runs)
       if (existingTabs.includes(tabName)) {
         console.log(`skipped — tab "${tabName}" already exists`);
+        markProcessed(filename); // tab exists = effectively done
         skipped++;
         continue;
       }
@@ -172,18 +217,18 @@ async function main() {
 
       await createTab(sheets, tabName);
       await appendToTab(sheets, tabName, rows);
-      existingTabs.push(tabName); // track for rest of this run
+      existingTabs.push(tabName);
+      markProcessed(filename); // ← save progress immediately after success
 
       console.log(`✅  ${rows.length} items → "${tabName}"`);
       done++;
 
     } catch (err) {
       console.log(`❌  ${err.message}`);
-      failed++;
+      failed++; // not marked as processed — will retry next run
     }
 
-    // Pause between files to stay within Gemini free-tier rate limits
-    if (i < files.length - 1) await new Promise(r => setTimeout(r, 2000));
+    if (i < files.length - 1) await new Promise(r => setTimeout(r, 5000));
   }
 
   console.log(`\n─────────────────────────────`);

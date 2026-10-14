@@ -10,6 +10,9 @@ node_modules/
 # local import folder
 pdfs/
 
+# local import progress tracker
+.processed.json
+
 # OS
 .DS_Store
 Thumbs.db

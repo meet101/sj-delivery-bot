@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const Anthropic = require('@anthropic-ai/sdk');
 const { google } = require('googleapis');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -83,8 +83,8 @@ async function writeToTab(tabName, rows) {
   });
 }
 
-// ─── Gemini PDF Extraction (free) ─────────────────────────────────────────────
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// ─── Claude PDF Extraction ────────────────────────────────────────────────────
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const PROMPT = `Extract all data from this delivery order PDF.
 Return ONLY a valid JSON array — no markdown, no explanation.
@@ -101,17 +101,40 @@ Each element is one line item with exactly these keys:
   "ordered":       ordered quantity as a number,
   "delivered":     delivered quantity as a number
 }
-Header fields (date, order_no, etc.) repeat on every row. One object per line item.`;
+Header fields repeat on every row. One object per line item.`;
 
 async function extractFromPDF(base64Data) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-  const result = await model.generateContent([
-    { inlineData: { mimeType: 'application/pdf', data: base64Data } },
-    PROMPT
-  ]);
-  const raw   = result.response.text().trim();
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5',
+    max_tokens: 8000,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
+        { type: 'text', text: PROMPT }
+      ]
+    }]
+  });
+
+  const raw   = response.content[0].text.trim();
   const clean = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-  return JSON.parse(clean);
+
+  try {
+    return JSON.parse(clean);
+  } catch (err) {
+    // Try to salvage a truncated response by closing the array
+    const lastComma = clean.lastIndexOf('},');
+    if (lastComma !== -1) {
+      const salvaged = clean.slice(0, lastComma + 1) + ']';
+      try {
+        const items = JSON.parse(salvaged);
+        console.log(`   ⚠️  Response truncated — salvaged ${items.length} items`);
+        return items;
+      } catch {}
+    }
+    console.error('   Raw response snippet:', clean.slice(-200));
+    throw new Error(`JSON parse failed: ${err.message}`);
+  }
 }
 
 // ─── WhatsApp Bot ─────────────────────────────────────────────────────────────
@@ -153,6 +176,12 @@ client.on('message_create', async msg => {
   const chat = await msg.getChat();
   if (!chat.isGroup || chat.name !== GROUP_NAME) return;
 
+  const filename = (msg._data.filename || '').toLowerCase();
+  if (!filename.startsWith('delivery_')) {
+    console.log(`   ⏭️  Skipping "${msg._data.filename}" — not a delivery PDF`);
+    return;
+  }
+
   const media = await msg.downloadMedia();
   if (!media || media.mimetype !== 'application/pdf') return;
 
@@ -160,7 +189,7 @@ client.on('message_create', async msg => {
   console.log(`\n📄 PDF from "${sender}": ${msg._data.filename || 'document.pdf'}`);
 
   try {
-    console.log('   🔍 Reading with Gemini...');
+    console.log('   🔍 Reading with Claude...');
     const items = await extractFromPDF(media.data);
 
     const tabName    = makeTabName(items);

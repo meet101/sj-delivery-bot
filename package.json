@@ -1,9 +1,9 @@
 {
-  "name": "whatsapp-delivery-bot",
+  "name": "sj-delivery-bot",
   "version": "1.0.0",
   "main": "index.js",
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
+    "@anthropic-ai/sdk": "^0.39.0",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",
     "qrcode-terminal": "^0.12.0",

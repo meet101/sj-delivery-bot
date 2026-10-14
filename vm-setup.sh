@@ -10,11 +10,11 @@ echo ""
 
 # ── 1. System packages ─────────────────────────────────────────────────────────
 echo "🔄  Updating system..."
-sudo apt-get update -qq
+sudo apt-get update
 
 echo "📦  Installing Node.js 20..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - -qq
-sudo apt-get install -y nodejs git chromium-browser -qq
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs git chromium-browser
 
 # ── 2. Swap (critical on 1 GB e2-micro) ───────────────────────────────────────
 if [ ! -f /swapfile ]; then
