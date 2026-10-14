@@ -172,8 +172,8 @@ client.on('disconnected', () => {
 
 client.on('message_create', async msg => {
   // debug — log every incoming message
-  const chat = await msg.getChat();
-  console.log(`📨 msg type=${msg.type} fromMe=${msg.fromMe} hasMedia=${msg.hasMedia} chat="${chat.name}" isGroup=${chat.isGroup} file="${msg._data.filename || '-'}"`);
+  const debugChat = await msg.getChat();
+  console.log(`📨 type=${msg.type} fromMe=${msg.fromMe} hasMedia=${msg.hasMedia} group="${debugChat.name}" isGroup=${debugChat.isGroup} file="${msg._data.filename || '-'}"`);
 
   if (!msg.hasMedia || msg.fromMe || msg.type !== 'document') return;
 
