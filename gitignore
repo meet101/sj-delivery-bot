@@ -1,0 +1,15 @@
+# credentials — never commit these
+.env
+google-credentials.json
+
+# runtime
+node_modules/
+.wwebjs_auth/
+.wwebjs_cache/
+
+# local import folder
+pdfs/
+
+# OS
+.DS_Store
+Thumbs.db

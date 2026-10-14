@@ -1,0 +1,26 @@
+name: Deploy to Google Cloud VM
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: SSH deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key:      ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/delivery-bot
+            git pull origin main
+            PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install --quiet
+            pm2 restart delivery-bot || pm2 start index.js --name delivery-bot
+            pm2 save
+            echo "✅ Deployed"
