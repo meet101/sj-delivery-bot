@@ -1,4 +1,5 @@
 require('dotenv').config();
+const http = require('http');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeInMemoryStore } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const Anthropic = require('@anthropic-ai/sdk');
@@ -161,13 +162,16 @@ async function startBot() {
 
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) {
+      waStatus = 'qr_pending';
       console.log('\n📱 Scan in WhatsApp → Settings → Linked Devices → Link a Device:\n');
       qrcode.generate(qr, { small: true });
     }
     if (connection === 'open') {
+      waStatus = 'connected';
       console.log(`\n✅ Bot is live! Watching: "${GROUP_NAME}"\n`);
     }
     if (connection === 'close') {
+      waStatus = 'disconnected';
       const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const shouldReconnect = code !== DisconnectReason.loggedOut;
       console.log(`⚠️  Disconnected (${code}). ${shouldReconnect ? 'Reconnecting...' : 'Logged out.'}`);
@@ -246,6 +250,19 @@ async function startBot() {
     }
   });
 }
+
+// ─── Health check server ──────────────────────────────────────────────────────
+let waStatus = 'starting';  // updated by connection events
+
+http.createServer((req, res) => {
+  if (waStatus === 'connected') {
+    res.writeHead(200);
+    res.end(JSON.stringify({ status: 'ok', whatsapp: waStatus, group: GROUP_NAME }));
+  } else {
+    res.writeHead(503);
+    res.end(JSON.stringify({ status: 'error', whatsapp: waStatus }));
+  }
+}).listen(3000, () => console.log('🔍 Health check running on port 3000'));
 
 console.log('🚀 Starting bot (Baileys — no browser needed)...');
 startBot();
