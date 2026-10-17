@@ -169,17 +169,23 @@ client.on('ready', () => console.log(`\n✅ Bot is live on Google Cloud! Watchin
 client.on('auth_failure', () => { console.error('❌ Auth failed.'); process.exit(1); });
 client.on('disconnected', () => { console.warn('⚠️  Reconnecting...'); setTimeout(() => client.initialize(), 5000); });
 
-client.on('message_create', async msg => {
-  if (!msg.hasMedia || msg.fromMe || msg.type !== 'document') return;
+client.on('message', async msg => {
+  if (!msg.hasMedia || msg.type !== 'document') return;
+
+  // log every document so we can debug filtering
+  const chat = await msg.getChat();
+  console.log(`📨 file="${msg._data.filename}" group="${chat.name}" isGroup=${chat.isGroup}`);
 
   const filename = (msg._data.filename || '').toLowerCase();
   if (!filename.startsWith('delivery_')) {
-    console.log(`   ⏭️  Skipping "${msg._data.filename}" — not a delivery PDF`);
+    console.log(`   ⏭️  Skipping — filename doesn't start with Delivery_`);
     return;
   }
 
-  const chat = await msg.getChat();
-  if (!chat.isGroup || chat.name !== GROUP_NAME) return;
+  if (!chat.isGroup || chat.name !== GROUP_NAME) {
+    console.log(`   ⏭️  Skipping — group "${chat.name}" doesn't match "${GROUP_NAME}"`);
+    return;
+  }
 
   const media = await msg.downloadMedia();
   if (!media || media.mimetype !== 'application/pdf') return;
