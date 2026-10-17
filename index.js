@@ -51,6 +51,19 @@ async function ensureTab(sheets, tabName, headers) {
   }
 }
 
+async function isDuplicate(sheets, orderNo, deliverySeq) {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${SUMMARY_TAB}'!B:C`  // Order No, Seq columns
+    });
+    const rows = res.data.values || [];
+    return rows.some(r => String(r[0]) === String(orderNo) && String(r[1]) === String(deliverySeq));
+  } catch {
+    return false;
+  }
+}
+
 async function writeDelivery(items) {
   const sheets = await getSheetsClient();
   await ensureTab(sheets, ALL_DELIVERIES_TAB, ALL_DELIVERIES_HEADERS);
@@ -214,9 +227,17 @@ async function startBot() {
 
         console.log('   🔍 Reading with Claude...');
         const items = await extractFromPDF(base64);
-        await writeDelivery(items);
-
         const first = items[0] || {};
+
+        // Check for duplicate before writing
+        const sheets = await getSheetsClient();
+        const dup = await isDuplicate(sheets, first.order_no, first.delivery_seq);
+        if (dup) {
+          console.log(`   ⏭️  Skipping — Order ${first.order_no} Seq ${first.delivery_seq} already in sheet`);
+          return;
+        }
+
+        await writeDelivery(items);
         console.log(`   ✅ ${items.length} items → Order ${first.order_no} Seq ${first.delivery_seq}`);
 
       } catch (err) {
