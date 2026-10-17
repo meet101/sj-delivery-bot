@@ -170,14 +170,11 @@ client.on('auth_failure', () => { console.error('❌ Auth failed.'); process.exi
 client.on('disconnected', () => { console.warn('⚠️  Reconnecting...'); setTimeout(() => client.initialize(), 5000); });
 
 client.on('message_create', async msg => {
-  const debugChat = await msg.getChat();
-  console.log(`📨 type=${msg.type} fromMe=${msg.fromMe} hasMedia=${msg.hasMedia} group="${debugChat.name}" isGroup=${debugChat.isGroup} file="${msg._data.filename || '-'}"`);
-
   if (!msg.hasMedia || msg.fromMe || msg.type !== 'document') return;
 
   const filename = (msg._data.filename || '').toLowerCase();
   if (!filename.startsWith('delivery_')) {
-    console.log(`   ⏭️  Skipping — not a delivery PDF`);
+    console.log(`   ⏭️  Skipping "${msg._data.filename}" — not a delivery PDF`);
     return;
   }
 
