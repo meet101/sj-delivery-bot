@@ -1,22 +1,24 @@
 require('dotenv').config();
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeInMemoryStore } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
 const Anthropic = require('@anthropic-ai/sdk');
 const { google } = require('googleapis');
+const qrcode = require('qrcode-terminal');
+const pino = require('pino');
+const path = require('path');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const GROUP_NAME     = process.env.WHATSAPP_GROUP_NAME;
-const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID;
-const TIMEZONE       = process.env.TIMEZONE || 'Asia/Kolkata';
-
-const ALL_DELIVERIES_TAB = 'All Deliveries';
-const SUMMARY_TAB        = 'Summary';
+const GROUP_NAME          = process.env.WHATSAPP_GROUP_NAME;
+const SPREADSHEET_ID      = process.env.GOOGLE_SPREADSHEET_ID;
+const TIMEZONE            = process.env.TIMEZONE || 'Asia/Kolkata';
+const AUTH_FOLDER         = path.join(__dirname, 'wa_auth');
+const ALL_DELIVERIES_TAB  = 'All Deliveries';
+const SUMMARY_TAB         = 'Summary';
 
 const ALL_DELIVERIES_HEADERS = [
   'Date', 'Order No', 'Seq', 'Delivery To',
   'Category', 'Item Name', 'Item Code', 'Ordered', 'Delivered', 'Variance'
 ];
-
 const SUMMARY_HEADERS = [
   'Date', 'Order No', 'Seq', 'Delivery To',
   'Total Items', 'Total Ordered', 'Total Delivered', 'Variance'
@@ -56,20 +58,12 @@ async function writeDelivery(items) {
 
   const first = items[0] || {};
 
-  // ── All Deliveries rows ──────────────────────────────────────────────────
   const detailRows = items.map(i => {
     const variance = (Number(i.delivered) || 0) - (Number(i.ordered) || 0);
     return [
-      i.date         || '',
-      i.order_no     || '',
-      i.delivery_seq || '',
-      i.delivery_to  || '',
-      i.category     || '',
-      i.item_name    || '',
-      i.item_code    || '',
-      i.ordered      ?? '',
-      i.delivered    ?? '',
-      variance
+      i.date || '', i.order_no || '', i.delivery_seq || '', i.delivery_to || '',
+      i.category || '', i.item_name || '', i.item_code || '',
+      i.ordered ?? '', i.delivered ?? '', variance
     ];
   });
 
@@ -80,7 +74,6 @@ async function writeDelivery(items) {
     resource: { values: detailRows }
   });
 
-  // ── Summary row ──────────────────────────────────────────────────────────
   const totalOrdered   = items.reduce((s, i) => s + (Number(i.ordered)   || 0), 0);
   const totalDelivered = items.reduce((s, i) => s + (Number(i.delivered) || 0), 0);
 
@@ -89,14 +82,8 @@ async function writeDelivery(items) {
     range: `'${SUMMARY_TAB}'!A:H`,
     valueInputOption: 'USER_ENTERED',
     resource: { values: [[
-      first.date         || '',
-      first.order_no     || '',
-      first.delivery_seq || '',
-      first.delivery_to  || '',
-      items.length,
-      totalOrdered,
-      totalDelivered,
-      totalDelivered - totalOrdered
+      first.date || '', first.order_no || '', first.delivery_seq || '', first.delivery_to || '',
+      items.length, totalOrdered, totalDelivered, totalDelivered - totalOrdered
     ]]}
   });
 }
@@ -108,16 +95,13 @@ const PROMPT = `Extract all data from this delivery order PDF.
 Return ONLY a valid JSON array — no markdown, no explanation.
 Each element is one line item with exactly these keys:
 {
-  "date":          "document date as written",
-  "order_no":      "SellOrder No value",
-  "delivery_seq":  "Delivery Sequence No value",
-  "requested_by":  "RequestedBy value",
-  "delivery_to":   "delivery destination name",
-  "category":      "section heading this item falls under (e.g. Sweet, Gathiya, Sev)",
-  "item_name":     "item name without the code",
-  "item_code":     "digits only from parentheses e.g. 53001",
-  "ordered":       ordered quantity as a number,
-  "delivered":     delivered quantity as a number
+  "date": "document date as written", "order_no": "SellOrder No value",
+  "delivery_seq": "Delivery Sequence No value", "requested_by": "RequestedBy value",
+  "delivery_to": "delivery destination name",
+  "category": "section heading this item falls under (e.g. Sweet, Gathiya, Sev)",
+  "item_name": "item name without the code",
+  "item_code": "digits only from parentheses e.g. 53001",
+  "ordered": ordered quantity as a number, "delivered": delivered quantity as a number
 }
 Header fields repeat on every row. One object per line item.`;
 
@@ -133,76 +117,114 @@ async function extractFromPDF(base64Data) {
       ]
     }]
   });
-
   const raw   = response.content[0].text.trim();
   const clean = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-
   try {
     return JSON.parse(clean);
   } catch {
-    const lastComma = clean.lastIndexOf('},');
-    if (lastComma !== -1) {
+    const i = clean.lastIndexOf('},');
+    if (i !== -1) {
       try {
-        const items = JSON.parse(clean.slice(0, lastComma + 1) + ']');
-        console.log(`   ⚠️  Truncated — salvaged ${items.length} items`);
-        return items;
+        const r = JSON.parse(clean.slice(0, i + 1) + ']');
+        console.log(`   ⚠️  Truncated — salvaged ${r.length} items`);
+        return r;
       } catch {}
     }
     throw new Error('JSON parse failed');
   }
 }
 
-// ─── WhatsApp Bot ─────────────────────────────────────────────────────────────
-const client = new Client({
-  authStrategy: new LocalAuth({ clientId: 'delivery-bot' }),
-  puppeteer: {
-    executablePath: '/usr/bin/chromium-browser',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-  }
-});
+// ─── WhatsApp Bot (Baileys — no browser needed) ───────────────────────────────
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
 
-client.on('qr', qr => {
-  console.log('\n📱 Scan in WhatsApp → Settings → Linked Devices → Link a Device:\n');
-  qrcode.generate(qr, { small: true });
-});
-client.on('ready', () => console.log(`\n✅ Bot is live on Google Cloud! Watching: "${GROUP_NAME}"\n`));
-client.on('auth_failure', () => { console.error('❌ Auth failed.'); process.exit(1); });
-client.on('disconnected', () => { console.warn('⚠️  Reconnecting...'); setTimeout(() => client.initialize(), 5000); });
+  const sock = makeWASocket({
+    auth: state,
+    logger: pino({ level: 'silent' }), // suppress Baileys internal logs
+    printQRInTerminal: false
+  });
 
-client.on('message', async msg => {
-  if (!msg.hasMedia || msg.type !== 'document') return;
+  sock.ev.on('creds.update', saveCreds);
 
-  // log every document so we can debug filtering
-  const chat = await msg.getChat();
-  console.log(`📨 file="${msg._data.filename}" group="${chat.name}" isGroup=${chat.isGroup}`);
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      console.log('\n📱 Scan in WhatsApp → Settings → Linked Devices → Link a Device:\n');
+      qrcode.generate(qr, { small: true });
+    }
+    if (connection === 'open') {
+      console.log(`\n✅ Bot is live! Watching: "${GROUP_NAME}"\n`);
+    }
+    if (connection === 'close') {
+      const code = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      const shouldReconnect = code !== DisconnectReason.loggedOut;
+      console.log(`⚠️  Disconnected (${code}). ${shouldReconnect ? 'Reconnecting...' : 'Logged out.'}`);
+      if (shouldReconnect) setTimeout(startBot, 5000);
+    }
+  });
 
-  const filename = (msg._data.filename || '').toLowerCase();
-  if (!filename.startsWith('delivery_')) {
-    console.log(`   ⏭️  Skipping — filename doesn't start with Delivery_`);
-    return;
-  }
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
 
-  if (!chat.isGroup || chat.name !== GROUP_NAME) {
-    console.log(`   ⏭️  Skipping — group "${chat.name}" doesn't match "${GROUP_NAME}"`);
-    return;
-  }
+    for (const msg of messages) {
+      try {
+        // Only handle messages with document attachments
+        const content = msg.message;
+        if (!content) continue;
 
-  const media = await msg.downloadMedia();
-  if (!media || media.mimetype !== 'application/pdf') return;
+        const docMsg = content.documentMessage;
+        if (!docMsg) continue;
 
-  const sender = msg._data.notifyName || msg.from;
-  console.log(`\n📄 PDF from "${sender}": ${msg._data.filename}`);
+        const filename = docMsg.fileName || '';
+        const mimetype = docMsg.mimetype || '';
 
-  try {
-    console.log('   🔍 Reading with Claude...');
-    const items = await extractFromPDF(media.data);
-    await writeDelivery(items);
-    const first = items[0] || {};
-    console.log(`   ✅ ${items.length} items → Order ${first.order_no} Seq ${first.delivery_seq}`);
-  } catch (err) {
-    console.error('   ❌ Error:', err.message);
-  }
-});
+        console.log(`📨 file="${filename}" mimetype="${mimetype}" group=${msg.key.remoteJid}`);
 
-console.log('🚀 Starting bot...');
-client.initialize();
+        // Only PDFs
+        if (mimetype !== 'application/pdf') continue;
+
+        // Only Delivery_ files
+        if (!filename.toLowerCase().startsWith('delivery_')) {
+          console.log(`   ⏭️  Skipping — filename doesn't start with Delivery_`);
+          continue;
+        }
+
+        // Get group name
+        const jid = msg.key.remoteJid;
+        if (!jid.endsWith('@g.us')) {
+          console.log(`   ⏭️  Skipping — not a group message`);
+          continue;
+        }
+
+        const groupMeta = await sock.groupMetadata(jid);
+        const groupName = groupMeta.subject;
+
+        console.log(`   Group: "${groupName}"`);
+
+        if (groupName !== GROUP_NAME) {
+          console.log(`   ⏭️  Skipping — group doesn't match "${GROUP_NAME}"`);
+          continue;
+        }
+
+        console.log(`\n📄 PDF: ${filename}`);
+
+        // Download the PDF
+        const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+        const base64 = buffer.toString('base64');
+
+        console.log('   🔍 Reading with Claude...');
+        const items = await extractFromPDF(base64);
+        await writeDelivery(items);
+
+        const first = items[0] || {};
+        console.log(`   ✅ ${items.length} items → Order ${first.order_no} Seq ${first.delivery_seq}`);
+
+      } catch (err) {
+        console.error('   ❌ Error:', err.message);
+      }
+    }
+  });
+}
+
+console.log('🚀 Starting bot (Baileys — no browser needed)...');
+startBot();
